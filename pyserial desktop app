@@ -1,0 +1,136 @@
+// Nano simple serial control test
+#include <FastLED.h>
+
+#define LED_PIN     6
+#define NUM_LEDS    30
+#define LED_TYPE    WS2812B
+#define COLOR_ORDER GRB
+
+CRGB leds[NUM_LEDS];
+
+const uint16_t KELVIN_MIN = 2000;
+const uint16_t KELVIN_MAX = 9000;
+
+uint16_t kelvin = 4000;
+uint8_t gBrightness = 128;
+bool usingRGB = false;
+CRGB lastRGB = CRGB::White;
+
+String inputBuf = "";
+
+void setup() {
+  Serial.begin(115200);
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.setBrightness(gBrightness);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+  delay(50);
+  Serial.println("ARDUINO READY");
+  sendStatus();
+}
+
+CRGB kelvinToRGB(uint16_t kel) {
+  float temp = kel / 100.0f;
+  float r,g,b;
+  if (temp <= 66.0f) r = 255.0f;
+  else r = 329.698727446f * powf(temp - 60.0f, -0.1332047592f);
+  if (temp <= 66.0f) {
+    g = 99.4708025861f * logf(temp) - 161.1195681661f;
+  } else {
+    g = 288.1221695283f * powf(temp - 60.0f, -0.0755148492f);
+  }
+  if (temp >= 66.0f) b = 255.0f;
+  else if (temp <= 19.0f) b = 0.0f;
+  else b = 138.5177312231f * logf(temp - 10.0f) - 305.0447927307f;
+
+  r = constrain(r, 0.0f, 255.0f);
+  g = constrain(g, 0.0f, 255.0f);
+  b = constrain(b, 0.0f, 255.0f);
+  return CRGB((uint8_t)r, (uint8_t)g, (uint8_t)b);
+}
+
+int extractNumberAfter(const String &s, char token) {
+  int idx = s.indexOf(token);
+  if (idx < 0) return 0;
+  idx++;
+  String num = "";
+  while (idx < s.length() && isDigit(s.charAt(idx))) {
+    num += s.charAt(idx);
+    idx++;
+  }
+  return num.toInt();
+}
+
+void handleLine(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+
+  if (line.charAt(0) == 'K' || line.charAt(0) == 'k') {
+    String num = line.substring(1);
+    int v = num.toInt();
+    v = constrain(v, (int)KELVIN_MIN, (int)KELVIN_MAX);
+    kelvin = (uint16_t)v;
+    usingRGB = false;
+    Serial.print("ACK K="); Serial.println(kelvin);
+    return;
+  }
+
+  if (line.charAt(0) == 'B' || line.charAt(0) == 'b') {
+    String num = line.substring(1);
+    int v = num.toInt();
+    v = constrain(v, 0, 255);
+    gBrightness = (uint8_t)v;
+    FastLED.setBrightness(gBrightness);
+    Serial.print("ACK B="); Serial.println(gBrightness);
+    return;
+  }
+
+  if (line.indexOf('R') >= 0 && line.indexOf('G') >= 0 && line.indexOf('B') >= 0) {
+    int r = extractNumberAfter(line, 'R');
+    int g = extractNumberAfter(line, 'G');
+    int b = extractNumberAfter(line, 'B');
+    r = constrain(r, 0, 255);
+    g = constrain(g, 0, 255);
+    b = constrain(b, 0, 255);
+    lastRGB = CRGB((uint8_t)r, (uint8_t)g, (uint8_t)b);
+    usingRGB = true;
+    Serial.print("ACK RGB="); Serial.print(r); Serial.print(","); Serial.print(g); Serial.print(","); Serial.println(b);
+    return;
+  }
+
+  if (line.equalsIgnoreCase("S")) {
+    sendStatus();
+    return;
+  }
+
+  Serial.print("ERR unknown: "); Serial.println(line);
+}
+
+void sendStatus() {
+  Serial.print("STATUS MODE=");
+  Serial.print(usingRGB ? "RGB" : "KELVIN");
+  Serial.print(" K="); Serial.print(kelvin);
+  Serial.print(" B="); Serial.println(gBrightness);
+}
+
+void loop() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (inputBuf.length() > 0) {
+        handleLine(inputBuf);
+        inputBuf = "";
+      }
+    } else {
+      inputBuf += c;
+      if (inputBuf.length() > 80) inputBuf = inputBuf.substring(inputBuf.length() - 80);
+    }
+  }
+
+  CRGB out = usingRGB ? lastRGB : kelvinToRGB(kelvin);
+  FastLED.setBrightness(gBrightness);
+  fill_solid(leds, NUM_LEDS, out);
+  FastLED.show();
+
+  delay(20);
+}
