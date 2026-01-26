@@ -1,99 +1,300 @@
-# serial_led_test.py — tiny test UI to send serial commands to Arduino
+"""
+cct_darkwidget_stack_cfg.py
+Dark-mode CCT controller (stack layout) with tiny local config + .bat-friendly.
+
+Config:
+- Stored as JSON next to this script: cct_config.json
+- Remembers last_port, last_kelvin, last_brightness, auto_open
+
+Dependencies:
+python -m pip install pyserial ttkbootstrap
+"""
+import json
+import os
+import ttkbootstrap as ttkb
+from ttkbootstrap.constants import *
 import tkinter as tk
-from tkinter import ttk
-import serial, threading, time
+from tkinter import ttk, messagebox
+import serial
+import serial.tools.list_ports
+import threading
+import time
 
-# EDIT: set your serial port
-SERIAL_PORT = "COM3"   # or "/dev/ttyUSB0"
+# ---------- CONFIG ----------
 BAUD = 115200
+DEBOUNCE_MS = 120
 
-try:
-    ser = serial.Serial(SERIAL_PORT, BAUD, timeout=0.1)
-except Exception as e:
-    print("Could not open serial port:", e)
+DEFAULTS = {
+    "last_port": "",
+    "last_kelvin": 4000,
+    "last_brightness": 128,
+    "auto_open": True,   # set False if you don't want it to auto-connect
+}
+
+# ---------- Paths ----------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CFG_PATH = os.path.join(SCRIPT_DIR, "cct_config.json")
+
+# ---------- Globals ----------
+ser = None
+reader_running = False
+last_send_time = 0
+pending_send = None  # (type, value)
+lock = threading.Lock()
+cfg = dict(DEFAULTS)
+
+# ---------- Config helpers ----------
+def load_cfg():
+    global cfg
+    cfg = dict(DEFAULTS)
+    try:
+        if os.path.exists(CFG_PATH):
+            with open(CFG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                cfg.update({k: data.get(k, cfg[k]) for k in cfg.keys()})
+    except Exception:
+        # keep defaults if anything goes wrong
+        cfg = dict(DEFAULTS)
+
+def save_cfg():
+    try:
+        with open(CFG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
+
+# ---------- Serial helpers ----------
+def list_ports():
+    return [p.device for p in serial.tools.list_ports.comports()]
+
+def open_port(port):
+    global ser, reader_running
+    close_port()
+    try:
+        ser = serial.Serial(port, BAUD, timeout=0.1)
+    except Exception as e:
+        ser = None
+        messagebox.showerror("Serial Error", f"Could not open {port}:\n{e}")
+        return False
+    reader_running = True
+    t = threading.Thread(target=serial_reader, daemon=True)
+    t.start()
+    return True
+
+def close_port():
+    global ser, reader_running
+    reader_running = False
+    if ser:
+        try:
+            ser.close()
+        except:
+            pass
     ser = None
 
 def send_line(line):
+    global ser
     if ser and ser.is_open:
         try:
             ser.write((line + "\n").encode('ascii'))
-        except Exception as e:
-            print("Write error:", e)
+        except Exception:
+            pass
 
-def btn_red():
-    send_line("R255G0B0")
-def btn_green():
-    send_line("R0G255B0")
-def btn_blue():
-    send_line("R0G0B255")
-def btn_white():
-    send_line("R255G255B255")
-def btn_off():
-    send_line("R0G0B0")
-def btn_bright_inc():
-    send_line("B255")
-def btn_bright_med():
-    send_line("B128")
-def btn_bright_low():
-    send_line("B40")
-def btn_kelvin_3000():
-    send_line("K3000")
-def btn_kelvin_6500():
-    send_line("K6500")
-def btn_status():
-    send_line("S")
-
-# reader thread prints incoming ACK/status lines
-def reader():
-    if not ser: return
-    buf = b""
-    while True:
+def serial_reader():
+    # We intentionally ignore incoming lines in this simplified UI.
+    global reader_running, ser
+    while reader_running and ser:
         try:
-            data = ser.read(128)
-            if data:
-                buf += data
-                if b"\n" in buf:
-                    parts = buf.split(b"\n")
-                    for p in parts[:-1]:
-                        try:
-                            print("<<", p.decode())
-                        except:
-                            print("<<", p)
-                    buf = parts[-1]
-            else:
-                time.sleep(0.05)
-        except Exception as e:
-            print("Serial read error:", e)
-            time.sleep(1)
+            _ = ser.read(256)
+            time.sleep(0.03)
+        except Exception:
+            time.sleep(0.5)
 
-# Build UI
-root = tk.Tk()
-root.title("Serial LED Test")
+# ---------- Debounce / send ----------
+def send_debounced(kind, value):
+    global last_send_time, pending_send
+    now = int(time.time() * 1000)
+    with lock:
+        if now - last_send_time >= DEBOUNCE_MS:
+            if kind == 'K':
+                send_line(f"K{value}")
+            elif kind == 'B':
+                send_line(f"B{value}")
+            last_send_time = int(time.time() * 1000)
+            pending_send = None
+        else:
+            pending_send = (kind, value)
+            delay = DEBOUNCE_MS - (now - last_send_time) + 8
+            app.after(delay, flush_pending_send)
 
-frame = ttk.Frame(root, padding=12)
-frame.grid()
+def flush_pending_send():
+    global pending_send, last_send_time
+    with lock:
+        if not pending_send:
+            return
+        kind, value = pending_send
+        if kind == 'K':
+            send_line(f"K{value}")
+        elif kind == 'B':
+            send_line(f"B{value}")
+        last_send_time = int(time.time() * 1000)
+        pending_send = None
 
-ttk.Label(frame, text="Quick color buttons").grid(row=0, column=0, columnspan=4)
-ttk.Button(frame, text="Red", width=12, command=btn_red).grid(row=1, column=0, padx=4, pady=4)
-ttk.Button(frame, text="Green", width=12, command=btn_green).grid(row=1, column=1, padx=4, pady=4)
-ttk.Button(frame, text="Blue", width=12, command=btn_blue).grid(row=1, column=2, padx=4, pady=4)
-ttk.Button(frame, text="White", width=12, command=btn_white).grid(row=1, column=3, padx=4, pady=4)
+# ---------- UI callbacks ----------
+def refresh_ports():
+    ports = list_ports()
+    port_combo['values'] = ports
 
-ttk.Button(frame, text="Off", width=12, command=btn_off).grid(row=2, column=0, padx=4, pady=6)
-ttk.Button(frame, text="B=255", width=12, command=btn_bright_inc).grid(row=2, column=1, padx=4)
-ttk.Button(frame, text="B=128", width=12, command=btn_bright_med).grid(row=2, column=2, padx=4)
-ttk.Button(frame, text="B=40", width=12, command=btn_bright_low).grid(row=2, column=3, padx=4)
+    if not ports:
+        port_var.set("")
+        return
 
-ttk.Button(frame, text="Kelvin 3000K", width=18, command=btn_kelvin_3000).grid(row=3, column=0, columnspan=2, pady=6)
-ttk.Button(frame, text="Kelvin 6500K", width=18, command=btn_kelvin_6500).grid(row=3, column=2, columnspan=2, pady=6)
+    # Prefer last_port if it exists
+    last_port = cfg.get("last_port", "")
+    if last_port in ports:
+        port_combo.set(last_port)
+    else:
+        # keep current selection if possible, else pick first
+        current = port_var.get()
+        if current in ports:
+            port_combo.set(current)
+        else:
+            port_combo.current(0)
 
-ttk.Button(frame, text="Request STATUS", width=40, command=btn_status).grid(row=4, column=0, columnspan=4, pady=6)
+def toggle_connect():
+    if connect_btn['text'] == "Open":
+        port = port_var.get()
+        if not port:
+            messagebox.showwarning("No port", "Choose a serial port first.")
+            return
+        ok = open_port(port)
+        if ok:
+            connect_btn.config(text="Close")
+            port_combo.config(state='disabled')
 
-# start reader
-if ser:
-    t = threading.Thread(target=reader, daemon=True)
-    t.start()
-else:
-    ttk.Label(frame, text=f"Serial port {SERIAL_PORT} not open", foreground="red").grid(row=5, column=0, columnspan=4, pady=6)
+            # persist chosen port
+            cfg["last_port"] = port
+            save_cfg()
 
-root.mainloop()
+            # push current slider values immediately on connect
+            k = int(float(kelvin_slider.get()))
+            b = int(float(brightness_slider.get()))
+            send_line(f"K{k}")
+            send_line(f"B{b}")
+    else:
+        close_port()
+        connect_btn.config(text="Open")
+        port_combo.config(state='!disabled')
+
+def on_kelvin_slide(val):
+    k = int(float(val))
+    kelvin_label.config(text=f"{k} K")
+
+    cfg["last_kelvin"] = k
+    save_cfg()
+
+    if port_var.get() and connect_btn['text'] == "Close":
+        send_debounced('K', k)
+
+def on_brightness_slide(val):
+    b = int(float(val))
+    brightness_label.config(text=f"{b}")
+
+    cfg["last_brightness"] = b
+    save_cfg()
+
+    if port_var.get() and connect_btn['text'] == "Close":
+        send_debounced('B', b)
+
+# ---------- Startup ----------
+load_cfg()
+
+# ---------- Build UI ----------
+app = ttkb.Window(themename="darkly")
+app.title("CCT Controller")
+app.geometry("480x330")
+app.resizable(False, False)
+
+container = ttk.Frame(app, padding=18)
+container.pack(fill='both', expand=True)
+
+# Top row
+top_row = ttk.Frame(container)
+top_row.pack(fill='x', pady=(0,12))
+
+port_var = tk.StringVar(value=cfg.get("last_port", ""))
+ttk.Label(top_row, text="Serial port:", bootstyle="inverse-dark").pack(side='left')
+
+port_combo = ttk.Combobox(top_row, textvariable=port_var, state='readonly', width=20)
+port_combo.pack(side='left', padx=(8,6))
+
+refresh_btn = ttk.Button(top_row, text="Refresh", command=refresh_ports, bootstyle="outline-secondary")
+refresh_btn.pack(side='left', padx=(0,6))
+
+connect_btn = ttk.Button(top_row, text="Open", command=toggle_connect, bootstyle="success-outline")
+connect_btn.pack(side='left')
+
+# Center stack: sliders
+center_frame = ttk.Frame(container)
+center_frame.pack(expand=True)
+
+# Kelvin
+kelvin_row = ttk.Frame(center_frame)
+kelvin_row.pack(fill='x', pady=(6,8), padx=8)
+ttk.Label(kelvin_row, text="Color Temperature", bootstyle="inverse-dark").pack(side='left')
+
+kelvin_label = ttk.Label(kelvin_row, text="", bootstyle="warning-inverse")
+kelvin_label.pack(side='right')
+
+kelvin_slider = ttk.Scale(center_frame, from_=2000, to=9000, orient='horizontal', command=on_kelvin_slide, length=420)
+kelvin_slider.set(int(cfg.get("last_kelvin", 4000)))
+kelvin_slider.pack(pady=(6,16))
+kelvin_label.config(text=f"{int(kelvin_slider.get())} K")
+
+# Brightness
+bright_row = ttk.Frame(center_frame)
+bright_row.pack(fill='x', pady=(6,8), padx=8)
+ttk.Label(bright_row, text="Brightness", bootstyle="inverse-dark").pack(side='left')
+
+brightness_label = ttk.Label(bright_row, text="", bootstyle="warning-inverse")
+brightness_label.pack(side='right')
+
+brightness_slider = ttk.Scale(center_frame, from_=0, to=255, orient='horizontal', command=on_brightness_slide, length=420)
+brightness_slider.set(int(cfg.get("last_brightness", 128)))
+brightness_slider.pack(pady=(6,8))
+brightness_label.config(text=f"{int(brightness_slider.get())}")
+
+# Bottom row
+bottom_row = ttk.Frame(container)
+bottom_row.pack(pady=(10,0))
+ttk.Button(bottom_row, text="Detect ports", command=refresh_ports, bootstyle="secondary").pack()
+
+# initial ports
+refresh_ports()
+
+# auto-open last port if enabled and present
+def try_auto_open():
+    if not cfg.get("auto_open", True):
+        return
+    ports = list_ports()
+    lp = cfg.get("last_port", "")
+    if lp and lp in ports:
+        # open without popping dialogs
+        ok = open_port(lp)
+        if ok:
+            connect_btn.config(text="Close")
+            port_combo.config(state='disabled')
+            # push current values
+            k = int(float(kelvin_slider.get()))
+            b = int(float(brightness_slider.get()))
+            send_line(f"K{k}")
+            send_line(f"B{b}")
+
+app.after(150, try_auto_open)
+
+def on_close():
+    close_port()
+    app.destroy()
+
+app.protocol("WM_DELETE_WINDOW", on_close)
+app.mainloop()
