@@ -1,0 +1,99 @@
+# serial_led_test.py — tiny test UI to send serial commands to Arduino
+import tkinter as tk
+from tkinter import ttk
+import serial, threading, time
+
+# EDIT: set your serial port
+SERIAL_PORT = "COM3"   # or "/dev/ttyUSB0"
+BAUD = 115200
+
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD, timeout=0.1)
+except Exception as e:
+    print("Could not open serial port:", e)
+    ser = None
+
+def send_line(line):
+    if ser and ser.is_open:
+        try:
+            ser.write((line + "\n").encode('ascii'))
+        except Exception as e:
+            print("Write error:", e)
+
+def btn_red():
+    send_line("R255G0B0")
+def btn_green():
+    send_line("R0G255B0")
+def btn_blue():
+    send_line("R0G0B255")
+def btn_white():
+    send_line("R255G255B255")
+def btn_off():
+    send_line("R0G0B0")
+def btn_bright_inc():
+    send_line("B255")
+def btn_bright_med():
+    send_line("B128")
+def btn_bright_low():
+    send_line("B40")
+def btn_kelvin_3000():
+    send_line("K3000")
+def btn_kelvin_6500():
+    send_line("K6500")
+def btn_status():
+    send_line("S")
+
+# reader thread prints incoming ACK/status lines
+def reader():
+    if not ser: return
+    buf = b""
+    while True:
+        try:
+            data = ser.read(128)
+            if data:
+                buf += data
+                if b"\n" in buf:
+                    parts = buf.split(b"\n")
+                    for p in parts[:-1]:
+                        try:
+                            print("<<", p.decode())
+                        except:
+                            print("<<", p)
+                    buf = parts[-1]
+            else:
+                time.sleep(0.05)
+        except Exception as e:
+            print("Serial read error:", e)
+            time.sleep(1)
+
+# Build UI
+root = tk.Tk()
+root.title("Serial LED Test")
+
+frame = ttk.Frame(root, padding=12)
+frame.grid()
+
+ttk.Label(frame, text="Quick color buttons").grid(row=0, column=0, columnspan=4)
+ttk.Button(frame, text="Red", width=12, command=btn_red).grid(row=1, column=0, padx=4, pady=4)
+ttk.Button(frame, text="Green", width=12, command=btn_green).grid(row=1, column=1, padx=4, pady=4)
+ttk.Button(frame, text="Blue", width=12, command=btn_blue).grid(row=1, column=2, padx=4, pady=4)
+ttk.Button(frame, text="White", width=12, command=btn_white).grid(row=1, column=3, padx=4, pady=4)
+
+ttk.Button(frame, text="Off", width=12, command=btn_off).grid(row=2, column=0, padx=4, pady=6)
+ttk.Button(frame, text="B=255", width=12, command=btn_bright_inc).grid(row=2, column=1, padx=4)
+ttk.Button(frame, text="B=128", width=12, command=btn_bright_med).grid(row=2, column=2, padx=4)
+ttk.Button(frame, text="B=40", width=12, command=btn_bright_low).grid(row=2, column=3, padx=4)
+
+ttk.Button(frame, text="Kelvin 3000K", width=18, command=btn_kelvin_3000).grid(row=3, column=0, columnspan=2, pady=6)
+ttk.Button(frame, text="Kelvin 6500K", width=18, command=btn_kelvin_6500).grid(row=3, column=2, columnspan=2, pady=6)
+
+ttk.Button(frame, text="Request STATUS", width=40, command=btn_status).grid(row=4, column=0, columnspan=4, pady=6)
+
+# start reader
+if ser:
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+else:
+    ttk.Label(frame, text=f"Serial port {SERIAL_PORT} not open", foreground="red").grid(row=5, column=0, columnspan=4, pady=6)
+
+root.mainloop()
